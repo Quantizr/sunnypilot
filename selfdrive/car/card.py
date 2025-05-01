@@ -71,6 +71,12 @@ class Car:
   CP_SP: structs.CarParamsSP
   CP_SP_capnp: custom.CarParamsSP
 
+  def load_sunnypilot_params(self):
+    self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
+    self.custom_acc_increments_enabled = self.params.get_bool("CustomAccIncrementsEnabled")
+    self.custom_acc_short_increment = self.params.get("CustomAccShortPressIncrement")
+    self.custom_acc_long_increment = self.params.get("CustomAccLongPressIncrement")
+
   def __init__(self, CI=None, RI=None) -> None:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'] + ['carControlSP'])
@@ -130,8 +136,12 @@ class Car:
     set_alternative_experience(self.CP, self.params)
     set_car_specific_params(self.CP, self.CP_SP, self.params)
 
-    # Dynamic Experimental Control
-    self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
+    # sunnypilot Params. We must define "None" because python likes to make you suffer and duplicate lines of code
+    self.dynamic_experimental_control = None
+    self.custom_acc_increments_enabled = None
+    self.custom_acc_short_increment = None
+    self.custom_acc_long_increment = None
+    self.load_sunnypilot_params()
 
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
 
@@ -220,7 +230,11 @@ class Car:
     if can_rcv_valid and REPLAY:
       self.can_log_mono_time = messaging.log_from_bytes(can_strs[0]).logMonoTime
 
-    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric)
+    custom_acc_increment = None
+    if self.custom_acc_increments_enabled:
+      custom_acc_increment = {"short_press": int(self.custom_acc_short_increment), "long_press": int(self.custom_acc_long_increment)}
+
+    self.v_cruise_helper.update_v_cruise(CS, self.sm['carControl'].enabled, self.is_metric, custom_acc_increment)
     if self.sm['carControl'].enabled and not self.CC_prev.enabled:
       # Use CarState w/ buttons from the step selfdrived enables on
       self.v_cruise_helper.initialize_v_cruise(self.CS_prev, self.experimental_mode, self.dynamic_experimental_control)
@@ -305,8 +319,8 @@ class Car:
       self.is_metric = self.params.get_bool("IsMetric")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
 
-      # sunnypilot
-      self.dynamic_experimental_control = self.params.get_bool("DynamicExperimentalControl")
+      # sunnypilot params
+      self.load_sunnypilot_params()
 
       time.sleep(0.1)
 
