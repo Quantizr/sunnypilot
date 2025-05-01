@@ -6,8 +6,15 @@
  */
 
 #include "selfdrive/ui/sunnypilot/qt/offroad/settings/vehicle_panel.h"
-
 #include "selfdrive/ui/sunnypilot/qt/widgets/scrollview.h"
+#include <QPushButton>
+#include <QSizePolicy>
+
+enum HyundaiLongTuneOption {
+  Off = 0,
+  LongTune = 1,
+  EvenSmootherBraking = 2,
+};
 
 VehiclePanel::VehiclePanel(QWidget *parent) : QFrame(parent) {
   main_layout = new QStackedLayout(this);
@@ -20,21 +27,94 @@ VehiclePanel::VehiclePanel(QWidget *parent) : QFrame(parent) {
   platformSelector = new PlatformSelector();
   list->addItem(platformSelector);
 
+  QObject::connect(uiState(), &UIState::offroadTransition, this, [=](bool offroad_transition) {
+    offroad = offroad_transition;
+    updatePanel(offroad);
+    updateCarToggles();
+  });
+
   ScrollViewSP *scroller = new ScrollViewSP(list, this);
   vlayout->addWidget(scroller);
 
-  QObject::connect(uiState(), &UIState::offroadTransition, this, &VehiclePanel::updatePanel);
+  QObject::connect(platformSelector, &PlatformSelector::clicked, [=]() {
+    QTimer::singleShot(100, this, &VehiclePanel::updateCarToggles);
+  });
 
+  std::vector<QString> tuning_buttons { tr("Off"), tr("Dynamic"), tr("Predictive") };
+  hkgtuningToggle = new ButtonParamControlSP(
+    "HyundaiLongTune",
+    tr("Custom Longitudinal Tuning"),
+    tr("Select a tuning mode.\n"
+       "Off: no custom tuning applied.\n"
+       "Dynamic: on-the-spot adjustments using dynamic calculations.\n"
+       "Predictive: adjusts based on anticipated ACC variation."),
+       "../assets/offroad/icon_shell.png",
+    tuning_buttons
+  );
+  hkgtuningToggle->showDescription();
+  hkgtuningToggle->setProperty("originalDesc", hkgtuningToggle->getDescription());
+
+  for (auto btn : hkgtuningToggle->findChildren<QPushButton*>()) {
+    btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  }
+
+  connect(hkgtuningToggle, &ButtonParamControlSP::buttonToggled, this, [=](int index) {
+    hkg_state = index;
+    params.put("HyundaiLongTune", QString::number(index).toStdString());
+    params.putBool("HyundaiSmootherBraking", index == EvenSmootherBraking);
+    updateCarToggles();
+  });
+  // Add the tuning toggle to the layout
+  vlayout->addWidget(hkgtuningToggle);
+
+  // Add the vehicle screen to the main layout
   main_layout->addWidget(vehicleScreen);
-  main_layout->setCurrentWidget(vehicleScreen);
 }
 
 void VehiclePanel::showEvent(QShowEvent *event) {
   updatePanel(offroad);
+  updateCarToggles();
 }
 
 void VehiclePanel::updatePanel(bool _offroad) {
   platformSelector->refresh(_offroad);
-
   offroad = _offroad;
+}
+
+QString VehiclePanel::toggleDisableMsg(bool openpilotLong) const {
+  if (!offroad) {
+    return tr("Enable 'Always Offroad' in device panel, or turn vehicle off to activate this toggle");
+  }
+  if (!openpilotLong) {
+    return tr("Enable openpilot longitudinal control first.");
+  }
+  return QString();
+}
+
+void VehiclePanel::updateCarToggles() {
+  bool openpilotLong = params.getBool("AlphaLongitudinalEnabled");
+  QString brand = platformSelector->getPlatformBundle("brand").toString();
+
+  if (brand == "hyundai") {
+    hkgtuningToggle->setVisible(true);
+    QString msg = toggleDisableMsg(openpilotLong);
+    if (!msg.isEmpty()) {
+      hkgtuningToggle->setEnabled(false);
+      hkgtuningToggle->setDescription(msg);
+      hkgtuningToggle->showDescription();
+      return;
+    }
+    hkgtuningToggle->setEnabled(true);
+    hkgtuningToggle->setDescription(hkgtuningToggle->property("originalDesc").toString());
+
+    int tuningOption = QString::fromStdString(params.get("HyundaiLongTune")).toInt();
+    hkg_state = tuningOption;
+    hkgtuningToggle->setCheckedButton(hkg_state);
+    hkgtuningToggle->showDescription();
+  } else {
+    // Hide toggle if not hyundai.
+    params.put("HyundaiLongTune", "0");
+    params.putBool("HyundaiSmootherBraking", false);
+    hkgtuningToggle->setVisible(false);
+  }
 }
