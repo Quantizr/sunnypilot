@@ -84,7 +84,7 @@ class LatControlTorque(LatControl):
                                           desired_curvature, actual_curvature)
 
       freeze_integrator = steer_limited_by_controls or CS.steeringPressed or CS.vEgo < 5
-      pid_log.error = pid_log.error / (1 + abs(pid_log.error)) # dampen large errors to prevent overcorrection
+      # pid_log.error = pid_log.error / (1 + abs(pid_log.error)) # dampen large errors to prevent overcorrection
       output_torque = self.pid.update(pid_log.error,
                                       feedforward=ff,
                                       speed=CS.vEgo,
