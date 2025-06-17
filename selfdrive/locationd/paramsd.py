@@ -62,6 +62,7 @@ class VehicleParamsLearner:
     self.kf.init_state(self.x_initial, covs=self.P_initial, filter_time=t)
 
     self.angle_offset, self.roll, self.active = np.degrees(self.x_initial[States.ANGLE_OFFSET].item()), 0.0, False
+    self.steerRatioActive = False
     self.avg_angle_offset = self.angle_offset
 
   def handle_log(self, t: float, which: str, msg: capnp._DynamicStructReader):
@@ -108,9 +109,11 @@ class VehicleParamsLearner:
         # the respective estimate STD. Otherwise the STDs keep increasing, causing rapid changes in the
         # states in longer routes (especially straight stretches).
         stiffness = float(self.kf.x[States.STIFFNESS].item())
-        steer_ratio = float(self.kf.x[States.STEER_RATIO].item())
         self.kf.predict_and_observe(t, ObservationKind.STIFFNESS, np.array([[stiffness]]))
-        self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]))
+
+        if self.steerRatioActive:
+          steer_ratio = float(self.kf.x[States.STEER_RATIO].item())
+          self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]))
 
     elif which == 'liveCalibration':
       self.calibrator.feed_live_calib(msg)
@@ -121,6 +124,7 @@ class VehicleParamsLearner:
       in_linear_region = abs(steering_angle) < 45
       self.observed_speed = msg.vEgo
       self.active = self.observed_speed > MIN_ACTIVE_SPEED and in_linear_region
+      self.steerRatioActive = abs(steering_angle) > 5
 
       if self.active:
         self.kf.predict_and_observe(t, ObservationKind.STEER_ANGLE, np.array([[np.radians(steering_angle)]]))
