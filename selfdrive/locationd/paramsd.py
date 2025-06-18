@@ -111,9 +111,15 @@ class VehicleParamsLearner:
         stiffness = float(self.kf.x[States.STIFFNESS].item())
         self.kf.predict_and_observe(t, ObservationKind.STIFFNESS, np.array([[stiffness]]))
 
+        steer_ratio = float(self.kf.x[States.STEER_RATIO].item())
+
         if self.steerRatioActive:
-          steer_ratio = float(self.kf.x[States.STEER_RATIO].item())
+          # Default behavior: observe with high noise to prevent runaway estimates
           self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]))
+        else:
+          # Observe the current steer_ratio with very low noise to lock the estimate
+          steer_ratio_lock_R = np.atleast_2d(0.01**2)
+          self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]), R=steer_ratio_lock_R)
 
     elif which == 'liveCalibration':
       self.calibrator.feed_live_calib(msg)
