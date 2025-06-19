@@ -118,7 +118,7 @@ class VehicleParamsLearner:
           self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]))
         else:
           # Observe the current steer_ratio with very low noise to lock the estimate
-          self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]), R=np.array([[[0.01**2]]]))
+          self.kf.predict_and_observe(t, ObservationKind.STEER_RATIO, np.array([[steer_ratio]]), R=np.array([[[1]]]))
 
     elif which == 'liveCalibration':
       self.calibrator.feed_live_calib(msg)
