@@ -5,8 +5,6 @@ env:
   LFS_PUSH_URL: 'ssh://git@gitlab.com/sunnypilot/public/sunnypilot-new-lfs.git'
 
 on:
-  schedule:
-    - cron: '0 0 * * *'  # Runs at 00:00 UTC every day
   push:
     branches:
       - 'master-new'
