@@ -54,7 +54,7 @@ PORT = int(os.getenv("GPU_REMOTE_PORT", 55001))
 
 # Deadline in milliseconds to wait for a remote response.
 # If the remote response isn't received by this time, the local result is used.
-ALLOWED_DELAY_MS = int(os.getenv("ALLOWED_DELAY_MS", 35))
+ALLOWED_DELAY_MS = int(os.getenv("ALLOWED_DELAY_MS", 50))
 
 # Max acceptable Round-Trip Time (RTT) for a remote response.
 # This is derived from ALLOWED_DELAY_MS to account for network jitter.
@@ -84,6 +84,36 @@ def get_action_from_model(model_output: dict[str, np.ndarray], prev_action: log.
     return log.ModelDataV2.Action(desiredCurvature=float(desired_curvature),
                                   desiredAcceleration=float(desired_accel),
                                   shouldStop=bool(should_stop))
+
+
+def send_full(sock: socket.socket, iov: list[memoryview], flags: int) -> None:
+  """
+  Repeatedly call sendmsg until every byte from `iov` is queued.
+  Raises OSError if the socket closes.
+  """
+  # collapse the iovec into a mutable slice list so we can drop leading bytes
+  iov_view = iov
+  to_send  = sum(len(v) for v in iov_view)
+
+  while to_send:
+    sent = sock.sendmsg(iov_view, (), flags)        # <= may send < to_send
+    if sent == 0:
+      raise OSError("socket closed during send")
+
+    # advance the iovec by the amount actually written
+    remaining = sent
+    idx = 0
+    while remaining and idx < len(iov_view):
+      if remaining >= len(iov_view[idx]):
+        remaining -= len(iov_view[idx])
+        idx += 1
+      else:
+        iov_view[idx] = iov_view[idx][remaining:]
+        remaining = 0
+    iov_view = iov_view[idx:]
+    to_send  -= sent
+
+
 
 class FrameMeta:
   frame_id: int = 0
@@ -132,6 +162,7 @@ class ModelState:
     }
 
     # img buffers are managed in openCL transform code
+    self.vision_numpy: dict[str, np.ndarray] = {}
     self.vision_inputs: dict[str, Tensor] = {}
     self.vision_output = np.zeros(self.vision_output_size, dtype=np.float32)
     self.policy_inputs = {k: Tensor(v, device='NPY').realize() for k, v in self.numpy_inputs.items()}
@@ -186,7 +217,7 @@ class ModelState:
   def _io_thread(self):
     while True:
       try:
-        seq, payload = self.request_q.get(timeout=1)
+        seq, (total_len, iovecs) = self.request_q.get(timeout=1)
       except queue.Empty:
         continue
 
@@ -197,16 +228,22 @@ class ModelState:
 
       if sock is None:
         try:
-          self.request_q.put_nowait((seq, payload))
+          self.request_q.put_nowait((seq, (total_len, iovecs)))
         except queue.Full:
           pass
         time.sleep(1)
         continue
 
       try:
-        prefix = struct.pack("!II", len(payload), seq)
-        flags = socket.MSG_ZEROCOPY if hasattr(socket, "MSG_ZEROCOPY") else 0
-        sock.sendall(prefix + payload, flags)
+        header = struct.pack("!II", total_len, seq)
+        full_iov = [memoryview(header)] + list(iovecs)
+
+        flags = 0
+        if hasattr(socket, "MSG_ZEROCOPY"):
+          flags |= int(socket.MSG_ZEROCOPY)
+        if hasattr(socket, "MSG_NOSIGNAL"):
+          flags |= int(socket.MSG_NOSIGNAL)
+        send_full(sock, full_iov, flags)
 
         t_req = time.perf_counter_ns()
         raw_len = sock.recv(8)
@@ -248,7 +285,7 @@ class ModelState:
             self.current_sock = None
             self.link_status = False
         try:
-          self.request_q.put_nowait((seq, payload))
+          self.request_q.put_nowait((seq, (total_len, iovecs)))
         except queue.Full:
           pass
 
@@ -259,7 +296,7 @@ class ModelState:
 
   def run(
     self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray], inputs: dict[str, np.ndarray], prepare_only: bool
-  ) -> dict[str, np.ndarray] | None:
+) -> dict[str, np.ndarray] | None:
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs['desire'][0] = 0
     new_desire = np.where(inputs['desire'] - self.prev_desire > 0.99, inputs['desire'], 0)
@@ -275,6 +312,7 @@ class ModelState:
 
     for key in imgs_cl:
       frame_input = self.frames[key].buffer_from_cl(imgs_cl[key]).reshape(self.vision_input_shapes[key])
+      self.vision_numpy[key] = frame_input
       self.vision_inputs[key] = Tensor(frame_input, dtype=dtypes.uint8).realize()
 
     if TICI and not USBGPU:
@@ -291,20 +329,27 @@ class ModelState:
     seq = self.seq_counter
     self.seq_counter = (self.seq_counter + 1) % (1 << 32)  # rollover
 
-    # build payload (same as before)
-    vision_blob = b"".join(v.numpy().tobytes() for v in self.vision_inputs.values())
-    extras_blob = (
+    # build iovecs for zero-copy send
+    iovecs = []
+    for key in self.vision_input_names:
+      mv = memoryview(self.vision_numpy[key]).cast('B')   # bytes view
+      # optional: mv = mv.toreadonly()                    # Python 3.12+
+      iovecs.append(mv)
+
+    extras = (
         new_desire.astype(np.float32).tobytes() +
         inputs['traffic_convention'].astype(np.float32).tobytes() +
         inputs['lateral_control_params'].astype(np.float32).tobytes()
     )
-    payload = vision_blob + extras_blob
+    iovecs.append(memoryview(extras))
+
+    total_len = sum(len(v) for v in iovecs)
 
     if self.link_status:
       try:
-        self.request_q.put_nowait((seq, payload))
+        self.request_q.put_nowait((seq, (total_len, iovecs)))  # Queue total_len and iovecs instead of payload
       except queue.Full:
-        pass # drop if back-pressured
+        pass  # drop if back-pressured
 
     # run local models (blocking compute)
     local_vision_output = self.vision_run(**self.vision_inputs).contiguous().realize().uop.base.buffer.numpy()
