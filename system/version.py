@@ -13,7 +13,7 @@ from openpilot.common.git import get_commit, get_origin, get_branch, get_short_b
 RELEASE_SP_BRANCHES = ['release-c3']
 TESTED_SP_BRANCHES = ['staging-c3', 'staging-c3-new']
 MASTER_SP_BRANCHES = ['master']
-RELEASE_BRANCHES = ['release3-staging', 'release3', 'nightly'] + RELEASE_SP_BRANCHES
+RELEASE_BRANCHES = ['release3-staging', 'release3', 'release-tici', 'nightly'] + RELEASE_SP_BRANCHES
 TESTED_BRANCHES = RELEASE_BRANCHES + ['devel', 'devel-staging', 'nightly-dev'] + TESTED_SP_BRANCHES
 
 BUILD_METADATA_FILENAME = "build.json"
@@ -85,7 +85,8 @@ class OpenpilotMetadata:
 
   @property
   def sunnypilot_remote(self) -> bool:
-    return self.git_normalized_origin == "github.com/sunnypilot/sunnypilot"
+    return self.git_normalized_origin in ("github.com/sunnypilot/sunnypilot",
+                                          "github.com/sunnypilot/openpilot")
 
   @property
   def git_normalized_origin(self) -> str:
