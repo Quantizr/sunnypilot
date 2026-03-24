@@ -1,32 +1,25 @@
 from enum import IntEnum
 import os
+import requests
 import threading
 import time
-from functools import lru_cache
 
-from openpilot.common.api import Api, api_get
+from openpilot.common.api import api_get
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
 from openpilot.system.athena.registration import UNREGISTERED_DONGLE_ID
-
-TOKEN_EXPIRY_HOURS = 2
+from openpilot.selfdrive.ui.lib.api_helpers import get_token
 
 
 class PrimeType(IntEnum):
-  UNKNOWN = -2,
-  UNPAIRED = -1,
-  NONE = 0,
-  MAGENTA = 1,
-  LITE = 2,
-  BLUE = 3,
-  MAGENTA_NEW = 4,
-  PURPLE = 5,
-
-
-@lru_cache(maxsize=1)
-def get_token(dongle_id: str, t: int):
-  print('getting token')
-  return Api(dongle_id).get_token(expiry_hours=TOKEN_EXPIRY_HOURS)
+  UNKNOWN = -2
+  UNPAIRED = -1
+  NONE = 0
+  MAGENTA = 1
+  LITE = 2
+  BLUE = 3
+  MAGENTA_NEW = 4
+  PURPLE = 5
 
 
 class PrimeState:
@@ -37,11 +30,11 @@ class PrimeState:
   def __init__(self):
     self._params = Params()
     self._lock = threading.Lock()
+    self._session = requests.Session()  # reuse session to reduce SSL handshake overhead
     self.prime_type: PrimeType = self._load_initial_state()
 
     self._running = False
     self._thread = None
-    self.start()
 
   def _load_initial_state(self) -> PrimeType:
     prime_type_str = os.getenv("PRIME_TYPE") or self._params.get("PrimeType")
@@ -58,15 +51,13 @@ class PrimeState:
       return
 
     try:
-      identity_token = get_token(dongle_id, int(time.monotonic() / (TOKEN_EXPIRY_HOURS / 2 * 60 * 60)))
-      response = api_get(f"v1.1/devices/{dongle_id}", timeout=self.API_TIMEOUT, access_token=identity_token)
+      identity_token = get_token(dongle_id)
+      response = api_get(f"v1.1/devices/{dongle_id}", timeout=self.API_TIMEOUT, access_token=identity_token, session=self._session)
       if response.status_code == 200:
         data = response.json()
         is_paired = data.get("is_paired", False)
         prime_type = data.get("prime_type", 0)
         self.set_type(PrimeType(prime_type) if is_paired else PrimeType.UNPAIRED)
-      elif response.status_code == 401:
-        get_token.cache_clear()
     except Exception as e:
       cloudlog.error(f"Failed to fetch prime status: {e}")
 
@@ -78,8 +69,10 @@ class PrimeState:
         cloudlog.info(f"Prime type updated to {prime_type}")
 
   def _worker_thread(self) -> None:
+    from openpilot.selfdrive.ui.ui_state import ui_state, device
     while self._running:
-      self._fetch_prime_status()
+      if not ui_state.started and device._awake:
+        self._fetch_prime_status()
 
       for _ in range(int(self.FETCH_INTERVAL / self.SLEEP_INTERVAL)):
         if not self._running:
@@ -105,6 +98,10 @@ class PrimeState:
   def is_prime(self) -> bool:
     with self._lock:
       return bool(self.prime_type > PrimeType.NONE)
+
+  def is_paired(self) -> bool:
+    with self._lock:
+      return self.prime_type > PrimeType.UNPAIRED
 
   def __del__(self):
     self.stop()

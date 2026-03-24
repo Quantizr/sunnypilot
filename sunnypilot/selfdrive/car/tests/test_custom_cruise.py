@@ -1,8 +1,8 @@
 import pytest
-from parameterized import parameterized_class
 
 from cereal import car
 from openpilot.common.constants import CV
+from openpilot.common.parameterized import parameterized_class
 from openpilot.common.params import Params
 from openpilot.selfdrive.car.cruise import V_CRUISE_INITIAL
 from openpilot.selfdrive.car.tests.test_cruise_speed import TestVCruiseHelper
@@ -11,7 +11,8 @@ ButtonEvent = car.CarState.ButtonEvent
 ButtonType = car.CarState.ButtonEvent.Type
 
 
-@parameterized_class(('pcm_cruise',), [(False,)])
+# TODO: test pcmCruise and pcmCruiseSpeed
+@parameterized_class(('pcm_cruise', 'pcm_cruise_speed'), [(False, True)])
 class TestCustomAccIncrements(TestVCruiseHelper):
   def setup_method(self):
     TestVCruiseHelper.setup_method(self)

@@ -30,8 +30,8 @@ CRUISE_INTERVAL_SIGN = {
 
 
 class VCruiseHelper(VCruiseHelperSP):
-  def __init__(self, CP):
-    VCruiseHelperSP.__init__(self)
+  def __init__(self, CP, CP_SP):
+    VCruiseHelperSP.__init__(self, CP, CP_SP)
     self.CP = CP
     self.v_cruise_kph = V_CRUISE_UNSET
     self.v_cruise_cluster_kph = V_CRUISE_UNSET
@@ -46,12 +46,16 @@ class VCruiseHelper(VCruiseHelperSP):
   def update_v_cruise(self, CS, enabled, is_metric):
     self.v_cruise_kph_last = self.v_cruise_kph
 
+    self.get_minimum_set_speed(is_metric)
+
+    _enabled = self.update_enabled_state(CS, enabled)
+
     if CS.cruiseState.available:
-      if not self.CP.pcmCruise:
+      if not self.CP.pcmCruise or (not self.CP_SP.pcmCruiseSpeed and _enabled):
         # if stock cruise is completely disabled, then we can use our own set speed logic
-        self._update_v_cruise_non_pcm(CS, enabled, is_metric)
+        self._update_v_cruise_non_pcm(CS, _enabled, is_metric)
+        self.update_speed_limit_assist_v_cruise_non_pcm()
         self.v_cruise_cluster_kph = self.v_cruise_kph
-        self.update_button_timers(CS, enabled)
       else:
         self.v_cruise_kph = CS.cruiseState.speed * CV.MS_TO_KPH
         self.v_cruise_cluster_kph = CS.cruiseState.speedCluster * CV.MS_TO_KPH
@@ -64,6 +68,9 @@ class VCruiseHelper(VCruiseHelperSP):
     else:
       self.v_cruise_kph = V_CRUISE_UNSET
       self.v_cruise_cluster_kph = V_CRUISE_UNSET
+
+    if not self.CP.pcmCruise or not self.CP_SP.pcmCruiseSpeed:
+      self.update_button_timers(CS, enabled)
 
   def _update_v_cruise_non_pcm(self, CS, enabled, is_metric):
     # handle button presses. TODO: this should be in state_control, but a decelCruise press
@@ -101,6 +108,12 @@ class VCruiseHelper(VCruiseHelperSP):
     if not self.button_change_states[button_type]["enabled"]:
       return
 
+    # Speed Limit Assist for Non PCM long cars.
+    # True: Disallow set speed changes when user confirmed the target set speed during preActive state
+    # False: Allow set speed changes as SLA is not requesting user confirmation
+    if self.update_speed_limit_assist_pre_active_confirmed(button_type):
+      return
+
     long_press, v_cruise_delta = VCruiseHelperSP.update_v_cruise_delta(self, long_press, v_cruise_delta)
     if long_press and self.v_cruise_kph % v_cruise_delta != 0:  # partial interval
       self.v_cruise_kph = CRUISE_NEAREST_FUNC[button_type](self.v_cruise_kph / v_cruise_delta) * v_cruise_delta
@@ -111,7 +124,7 @@ class VCruiseHelper(VCruiseHelperSP):
     if CS.gasPressed and button_type in (ButtonType.decelCruise, ButtonType.setCruise):
       self.v_cruise_kph = max(self.v_cruise_kph, CS.vEgo * CV.MS_TO_KPH)
 
-    self.v_cruise_kph = np.clip(round(self.v_cruise_kph, 1), V_CRUISE_MIN, V_CRUISE_MAX)
+    self.v_cruise_kph = np.clip(round(self.v_cruise_kph, 1), self.v_cruise_min, V_CRUISE_MAX)
 
   def update_button_timers(self, CS, enabled):
     # increment timer for buttons still pressed

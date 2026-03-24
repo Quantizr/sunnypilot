@@ -1,17 +1,75 @@
+"""
+Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
+
+This file is part of sunnypilot and is licensed under the MIT License.
+See the LICENSE.md file in the root directory for more details.
+"""
+import cereal.messaging as messaging
 from cereal import log, car, custom
+from openpilot.common.constants import CV
 from openpilot.sunnypilot.selfdrive.selfdrived.events_base import EventsBase, Priority, ET, Alert, \
   NoEntryAlert, ImmediateDisableAlert, EngagementAlert, NormalPermanentAlert, AlertCallbackType, wrong_car_mode_alert
-
+from openpilot.sunnypilot.selfdrive.controls.lib.speed_limit import PCM_LONG_REQUIRED_MAX_SET_SPEED, CONFIRM_SPEED_THRESHOLD
+from openpilot.system.hardware import HARDWARE
 
 AlertSize = log.SelfdriveState.AlertSize
 AlertStatus = log.SelfdriveState.AlertStatus
 VisualAlert = car.CarControl.HUDControl.VisualAlert
 AudibleAlert = car.CarControl.HUDControl.AudibleAlert
+AudibleAlertSP = custom.SelfdriveStateSP.AudibleAlert
 EventNameSP = custom.OnroadEventSP.EventName
 
 
 # get event name from enum
 EVENT_NAME_SP = {v: k for k, v in EventNameSP.schema.enumerants.items()}
+
+IS_MICI = HARDWARE.get_device_type() == 'mici'
+
+
+def speed_limit_adjust_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  speedLimit = sm['longitudinalPlanSP'].speedLimit.resolver.speedLimit
+  speed = round(speedLimit * (CV.MS_TO_KPH if metric else CV.MS_TO_MPH))
+  message = f'Adjusting to {speed} {"km/h" if metric else "mph"} speed limit'
+  return Alert(
+    message,
+    "",
+    AlertStatus.normal, AlertSize.small,
+    Priority.LOW, VisualAlert.none, AudibleAlert.none, 4.)
+
+
+def speed_limit_pre_active_alert(CP: car.CarParams, CS: car.CarState, sm: messaging.SubMaster, metric: bool, soft_disable_time: int, personality) -> Alert:
+  speed_conv = CV.MS_TO_KPH if metric else CV.MS_TO_MPH
+  v_cruise_cluster = CS.vCruiseCluster
+  set_speed = sm['controlsState'].vCruiseDEPRECATED if v_cruise_cluster == 0.0 else v_cruise_cluster
+  set_speed_conv = round(set_speed * speed_conv)
+
+  speed_limit_final_last = sm['longitudinalPlanSP'].speedLimit.resolver.speedLimitFinalLast
+  speed_limit_final_last_conv = round(speed_limit_final_last * speed_conv)
+  alert_1_str = ""
+  alert_size = AlertSize.small
+
+  if CP.openpilotLongitudinalControl and CP.pcmCruise:
+    # PCM long
+    cst_low, cst_high = PCM_LONG_REQUIRED_MAX_SET_SPEED[metric]
+    pcm_long_required_max = cst_low if speed_limit_final_last_conv < CONFIRM_SPEED_THRESHOLD[metric] else cst_high
+    pcm_long_required_max_set_speed_conv = round(pcm_long_required_max * speed_conv)
+    speed_unit = "km/h" if metric else "mph"
+
+    alert_1_str = f"Speed Limit Assist: set to {pcm_long_required_max_set_speed_conv} {speed_unit} to engage"
+  else:
+    if IS_MICI:
+      if set_speed_conv < speed_limit_final_last_conv:
+        alert_1_str = "Press + to confirm speed limit"
+      elif set_speed_conv > speed_limit_final_last_conv:
+        alert_1_str = "Press - to confirm speed limit"
+    else:
+      alert_size = AlertSize.none
+
+  return Alert(
+    alert_1_str,
+    "",
+    AlertStatus.normal, alert_size,
+    Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleLow, .1)
 
 
 class EventsSP(EventsBase):
@@ -148,5 +206,41 @@ EVENTS_SP: dict[int, dict[str, Alert | AlertCallbackType]] = {
       "",
       AlertStatus.normal, AlertSize.small,
       Priority.LOW, VisualAlert.none, AudibleAlert.none, 1.),
-  }
+  },
+
+  EventNameSP.speedLimitActive: {
+    ET.WARNING: Alert(
+      "Auto adjusting to speed limit",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
+  },
+
+  EventNameSP.speedLimitChanged: {
+    ET.WARNING: Alert(
+      "Set speed changed",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
+  },
+
+  EventNameSP.speedLimitPreActive: {
+    ET.WARNING: speed_limit_pre_active_alert,
+  },
+
+  EventNameSP.speedLimitPending: {
+    ET.WARNING: Alert(
+      "Auto adjusting to last speed limit",
+      "",
+      AlertStatus.normal, AlertSize.small,
+      Priority.LOW, VisualAlert.none, AudibleAlertSP.promptSingleHigh, 5.),
+  },
+
+  EventNameSP.e2eChime: {
+    ET.PERMANENT: Alert(
+      "",
+      "",
+      AlertStatus.normal, AlertSize.none,
+      Priority.MID, VisualAlert.none, AudibleAlert.prompt, 3.),
+  },
 }
