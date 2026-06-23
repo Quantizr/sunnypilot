@@ -94,7 +94,9 @@ void CameraState::set_exposure_rect() {
       [0, 0, 1]
     ]
   */
-  auto ae_target = ae_targets[camera.cc.camera_num];
+  // DISABLE_CAM0_AND_SWAP_LENS: cam1 now carries the wide lens, so meter the wide region instead of the road region
+  int ae_idx = (getenv("DISABLE_CAM0_AND_SWAP_LENS") && camera.cc.camera_num == 1) ? 0 : camera.cc.camera_num;
+  auto ae_target = ae_targets[ae_idx];
   Rect xywh_ref = ae_target.first;
   float fl_ref = ae_target.second;
 
