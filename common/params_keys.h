@@ -275,4 +275,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"TorqueParamsOverrideEnabled", {PERSISTENT | BACKUP, BOOL, "0"}},
     {"TorqueParamsOverrideFriction", {PERSISTENT | BACKUP, FLOAT, "0.1"}},
     {"TorqueParamsOverrideLatAccelFactor", {PERSISTENT | BACKUP, FLOAT, "2.5"}},
+
+    // When the road camera is unavailable (DISABLE_CAM0_AND_SWAP_LENS), crop the wide stream
+    // to approximate the narrow cam in the onroad UI instead of showing the full wide view.
+    {"WideCamCropToNarrow", {PERSISTENT | BACKUP, BOOL, "0"}},
 };
