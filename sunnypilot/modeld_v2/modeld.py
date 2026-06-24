@@ -215,7 +215,11 @@ def main(demo=False):
 
   # messaging
   pm = PubMaster(["modelV2", "drivingModelData", "cameraOdometry", "modelDataV2SP"])
-  sm = SubMaster(["deviceState", "carState", "roadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
+  sm = SubMaster(["deviceState", "carState", "roadCameraState", "wideRoadCameraState", "liveCalibration", "driverMonitoringState", "carControl", "liveDelay"])
+
+  # in a wide-only configuration (DISABLE_ROAD / DISABLE_CAM0_AND_SWAP_LENS) roadCameraState is never published,
+  # so source camera metadata (frameId, seen guard, sensor) from the wide camera message instead
+  cam_state = "wideRoadCameraState" if main_wide_camera else "roadCameraState"
 
   publish_state = PublishState()
   params = Params()
@@ -283,16 +287,16 @@ def main(demo=False):
     sm.update(0)
     desire = DH.desire
     is_rhd = sm["driverMonitoringState"].isRHD
-    frame_id = sm["roadCameraState"].frameId
+    frame_id = sm[cam_state].frameId
     v_ego = max(sm["carState"].vEgo, 0.)
     if sm.frame % 60 == 0:
       model.lat_delay = get_lat_delay(params, sm["liveDelay"].lateralDelay)
       model.PLANPLUS_CONTROL = params.get("PlanplusControl", return_default=True)
       camera_offset_helper.set_offset(params.get("CameraOffset", return_default=True))
     lat_delay = model.lat_delay + model.LAT_SMOOTH_SECONDS
-    if sm.updated["liveCalibration"] and sm.seen['roadCameraState'] and sm.seen['deviceState']:
+    if sm.updated["liveCalibration"] and sm.seen[cam_state] and sm.seen['deviceState']:
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
-      dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
+      dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm[cam_state].sensor))]
       model_transform_main = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics, False).astype(np.float32)
       model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics, True).astype(np.float32)
       model_transform_main, model_transform_extra = camera_offset_helper.update(model_transform_main, model_transform_extra, sm, main_wide_camera)
