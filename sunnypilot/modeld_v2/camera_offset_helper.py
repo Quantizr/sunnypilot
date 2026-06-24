@@ -28,10 +28,7 @@ class CameraOffsetHelper:
 
   def update(self, model_transform_main, model_transform_extra, sm, main_wide_camera):
     self.actual_camera_offset = (0.9 * self.actual_camera_offset) + (0.1 * self.camera_offset)
-    # in a wide-only configuration roadCameraState is never published (its sensor reads 'unknown'),
-    # so source the sensor from the wide camera message instead
-    cam_state = "wideRoadCameraState" if main_wide_camera else "roadCameraState"
-    dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm[cam_state].sensor))]
+    dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
     height = sm["liveCalibration"].height[0] if sm['liveCalibration'].height else 1.22
 
     intrinsics_main = dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics

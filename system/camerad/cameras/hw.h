@@ -36,28 +36,22 @@ const CameraConfig WIDE_ROAD_CAMERA_CONFIG = {
   .focal_len = 1.71,
   .publish_name = "wideRoadCameraState",
   .init_camera_state = &cereal::Event::Builder::initWideRoadCameraState,
-  // DISABLE_CAM0_AND_SWAP_LENS: cam0 (wide) has a permanent Camera Malfunction; cam1 takes over the
-  // wide stream, so the broken cam0 must not register it
-  .enabled = !getenv("DISABLE_WIDE_ROAD") && !getenv("DISABLE_CAM0_AND_SWAP_LENS"),
+  .enabled = !getenv("DISABLE_WIDE_ROAD"),
   .phy = CAM_ISP_IFE_IN_RES_PHY_0,
   .vignetting_correction = false,
   .output_type = ISP_IFE_PROCESSED,
   .staggered_sof = false,
 };
 
-// DISABLE_CAM0_AND_SWAP_LENS: workaround for a permanent Camera Malfunction on the wideRoadCamera (cam0).
-// The wide lens is physically swapped onto cam1, which is then presented as the wide camera
-// (vision stream + cereal message + optics), so modeld/selfdrived see a coherent wide-only device.
 const CameraConfig ROAD_CAMERA_CONFIG = {
   .camera_num = 1,
-  .stream_type = getenv("DISABLE_CAM0_AND_SWAP_LENS") ? VISION_STREAM_WIDE_ROAD : VISION_STREAM_ROAD,
-  .focal_len = getenv("DISABLE_CAM0_AND_SWAP_LENS") ? 1.71f : 8.0f,
-  .publish_name = getenv("DISABLE_CAM0_AND_SWAP_LENS") ? "wideRoadCameraState" : "roadCameraState",
-  .init_camera_state = getenv("DISABLE_CAM0_AND_SWAP_LENS") ? &cereal::Event::Builder::initWideRoadCameraState
-                                                            : &cereal::Event::Builder::initRoadCameraState,
+  .stream_type = VISION_STREAM_ROAD,
+  .focal_len = 8.0,
+  .publish_name = "roadCameraState",
+  .init_camera_state = &cereal::Event::Builder::initRoadCameraState,
   .enabled = !getenv("DISABLE_ROAD"),
   .phy = CAM_ISP_IFE_IN_RES_PHY_1,
-  .vignetting_correction = !getenv("DISABLE_CAM0_AND_SWAP_LENS"),
+  .vignetting_correction = true,
   .output_type = ISP_IFE_PROCESSED,
   .staggered_sof = false,
 };

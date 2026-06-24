@@ -2,8 +2,7 @@ import time
 import numpy as np
 import pyray as rl
 from cereal import log, messaging
-from msgq.visionipc import VisionStreamType, VisionIpcClient
-from openpilot.common.params import Params
+from msgq.visionipc import VisionStreamType
 from openpilot.selfdrive.ui import UI_BORDER_SIZE
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
 from openpilot.selfdrive.ui.onroad.alert_renderer import AlertRenderer
@@ -50,13 +49,7 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     self.view_from_calib = view_frame_from_device_frame.copy()
     self.view_from_wide_calib = view_frame_from_device_frame.copy()
 
-    self._params = Params()
-    # presentation intent (road-style vs full wide), decoupled from the actual connected stream
-    # so we can substitute the wide stream when the road camera is unavailable
-    self._view_intent = ROAD_CAM
-    self._crop_wide_to_narrow = False
-
-    self._matrix_cache_key = (0, 0.0, 0.0, stream_type, False)
+    self._matrix_cache_key = (0, 0.0, 0.0, stream_type)
     self._cached_matrix: np.ndarray | None = None
     self._content_rect = rl.Rectangle()
 
@@ -137,36 +130,17 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     rl.draw_rectangle_rounded_lines_ex(border_rect, border_roundness, 10, UI_BORDER_SIZE, border_color)
 
   def _switch_stream_if_needed(self, sm):
-    # available_streams is only populated after a successful connect; query directly while the
-    # primary stream can't connect (e.g. road camera gone) so we can still discover the wide stream
-    available = self.available_streams or VisionIpcClient.available_streams("camerad", block=False)
-    road_available = ROAD_CAM in available
-    wide_available = WIDE_CAM in available
-
-    # Decide the desired presentation (full wide vs road-style); unchanged stock logic
-    if sm['selfdriveState'].experimentalMode and wide_available:
+    if sm['selfdriveState'].experimentalMode and WIDE_CAM in self.available_streams:
       v_ego = sm['carState'].vEgo
       if v_ego < WIDE_CAM_MAX_SPEED:
-        intent = WIDE_CAM
+        target = WIDE_CAM
       elif v_ego > ROAD_CAM_MIN_SPEED:
-        intent = ROAD_CAM
+        target = ROAD_CAM
       else:
-        # Hysteresis zone - keep current presentation
-        intent = self._view_intent
+        # Hysteresis zone - keep current stream
+        target = self.stream_type
     else:
-      intent = ROAD_CAM
-    self._view_intent = intent
-
-    # Map the presentation onto an actual stream (+ whether to crop the wide image to fake narrow)
-    if intent == WIDE_CAM:
-      target, self._crop_wide_to_narrow = WIDE_CAM, False           # full wide view
-    elif road_available:
-      target, self._crop_wide_to_narrow = ROAD_CAM, False           # real narrow camera
-    else:
-      # road camera unavailable (e.g. DISABLE_CAM0_AND_SWAP_LENS): substitute the wide stream.
-      # B toggle crops it to approximate the narrow FOV; otherwise show the full wide view (A).
-      target = WIDE_CAM
-      self._crop_wide_to_narrow = self._params.get_bool("WideCamCropToNarrow")
+      target = ROAD_CAM
 
     if self.stream_type != target:
       self.switch_stream(target)
@@ -174,11 +148,8 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
   def _update_calibration(self):
     # Update device camera if not already set
     sm = ui_state.sm
-    if not self.device_camera and sm.seen['deviceState']:
-      # prefer the road camera message, but fall back to the wide one when road is unavailable
-      cam_state = 'roadCameraState' if sm.seen['roadCameraState'] else 'wideRoadCameraState'
-      if sm.seen[cam_state]:
-        self.device_camera = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm[cam_state].sensor))]
+    if not self.device_camera and sm.seen['roadCameraState'] and sm.seen['deviceState']:
+      self.device_camera = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
 
     # Check if live calibration data is available and valid
     if not (sm.updated["liveCalibration"] and sm.valid['liveCalibration']):
@@ -203,8 +174,7 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
       ui_state.sm.recv_frame['liveCalibration'],
       self._content_rect.width,
       self._content_rect.height,
-      self.stream_type,
-      self._crop_wide_to_narrow
+      self.stream_type
     )
     if cache_key == self._matrix_cache_key and self._cached_matrix is not None:
       return self._cached_matrix
@@ -214,13 +184,7 @@ class AugmentedRoadView(CameraView, AugmentedRoadViewSP):
     is_wide_camera = self.stream_type == WIDE_CAM
     intrinsic = device_camera.ecam.intrinsics if is_wide_camera else device_camera.fcam.intrinsics
     calibration = self.view_from_wide_calib if is_wide_camera else self.view_from_calib
-    if not is_wide_camera:
-      zoom = 1.1
-    elif self._crop_wide_to_narrow:
-      # crop the wide image to roughly the narrow cam's FOV (matches the road-cam zoom of 1.1)
-      zoom = 1.1 * device_camera.fcam.focal_length / device_camera.ecam.focal_length
-    else:
-      zoom = 2.0
+    zoom = 2.0 if is_wide_camera else 1.1
 
     # Calculate transforms for vanishing point
     calib_transform = intrinsic @ calibration
