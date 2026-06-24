@@ -294,9 +294,8 @@ def main(demo=False):
       device_from_calib_euler = np.array(sm["liveCalibration"].rpyCalib, dtype=np.float32)
       dc = DEVICE_CAMERAS[(str(sm['deviceState'].deviceType), str(sm['roadCameraState'].sensor))]
       model_transform_main = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics if main_wide_camera else dc.fcam.intrinsics, False).astype(np.float32)
-      big_img_from_wide = use_extra_client or main_wide_camera
-      extra_intrinsics = dc.ecam.intrinsics if big_img_from_wide else dc.fcam.intrinsics
-      model_transform_extra = get_warp_matrix(device_from_calib_euler, extra_intrinsics, True).astype(np.float32)
+      has_wide_camera = use_extra_client or main_wide_camera
+      model_transform_extra = get_warp_matrix(device_from_calib_euler, dc.ecam.intrinsics if has_wide_camera else dc.fcam.intrinsics, True).astype(np.float32)
       model_transform_main, model_transform_extra = camera_offset_helper.update(model_transform_main, model_transform_extra, sm, main_wide_camera)
       live_calib_seen = True
 

@@ -33,7 +33,7 @@ def dm_warp_pkl_path(w, h):
   return MODELS_DIR / f'dm_warp_{w}x{h}_tinygrad.pkl'
 
 
-def warp_perspective_tinygrad(src_flat, M_inv, dst_shape, src_shape, stride_pad, fill_value=None):
+def warp_perspective_tinygrad(src_flat, M_inv, dst_shape, src_shape, stride_pad):
   w_dst, h_dst = dst_shape
   h_src, w_src = src_shape
 
@@ -51,15 +51,8 @@ def warp_perspective_tinygrad(src_flat, M_inv, dst_shape, src_shape, stride_pad,
   x_nn_clipped = Tensor.round(src_x).clip(0, w_src - 1).cast('int')
   y_nn_clipped = Tensor.round(src_y).clip(0, h_src - 1).cast('int')
   idx = y_nn_clipped * (w_src + stride_pad) + x_nn_clipped
-  gathered = src_flat[idx]
 
-  if fill_value is None:
-    return gathered
-  # fill samples that fall outside the source image instead of replicating the clipped edge pixel,
-  # so a smaller-FOV source (road frame warped into the wide sbigmodel frame) gets clean padding
-  # rather than smeared edges. Normal operation never samples out of bounds, so the mask is a no-op there.
-  valid = (src_w > 0) & (src_x >= 0) & (src_x <= w_src - 1) & (src_y >= 0) & (src_y <= h_src - 1)
-  return valid.where(gathered, fill_value)
+  return src_flat[idx]
 
 
 def frames_to_tensor(frames, model_w, model_h):
@@ -85,16 +78,15 @@ def make_frame_prepare(cam_w, cam_h, model_w, model_h):
     # deinterleave NV12 UV plane (UVUV... -> separate U, V)
     uv = input_frame[uv_offset:uv_offset + uv_height * stride].reshape(uv_height, stride)
     with Context(SPLIT_REDUCEOP=0):
-      # neutral black for out-of-FOV padding: Y=0, chroma=128 (raw-zeroing UV would tint it green)
       y = warp_perspective_tinygrad(input_frame[:cam_h*stride],
                                     M_inv, (model_w, model_h),
-                                    (cam_h, cam_w), stride_pad, fill_value=0).realize()
+                                    (cam_h, cam_w), stride_pad).realize()
       u = warp_perspective_tinygrad(uv[:cam_h//2, :cam_w:2].flatten(),
                                     M_inv_uv, (model_w//2, model_h//2),
-                                    (cam_h//2, cam_w//2), 0, fill_value=128).realize()
+                                    (cam_h//2, cam_w//2), 0).realize()
       v = warp_perspective_tinygrad(uv[:cam_h//2, 1:cam_w:2].flatten(),
                                     M_inv_uv, (model_w//2, model_h//2),
-                                    (cam_h//2, cam_w//2), 0, fill_value=128).realize()
+                                    (cam_h//2, cam_w//2), 0).realize()
     yuv = y.cat(u).cat(v).reshape((model_h * 3 // 2, model_w))
     tensor = frames_to_tensor(yuv, model_w, model_h)
     return tensor
