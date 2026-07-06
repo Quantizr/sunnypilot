@@ -1,222 +1,165 @@
 #!/usr/bin/env python3
+"""Validate sunnypilot routes are parseable by stock commaai/openpilot.
+
+Cap'n Proto is wire-compatible across renames, type relocations, and
+additive fields. The only breaking change is a union variant that
+upstream doesn't recognize — an unknown discriminant makes the entire
+union unreadable.
+
+This script checks: for every struct with a union that exists in both
+schemas, does sunnypilot introduce union variants upstream doesn't have?
+"""
+
+from __future__ import annotations
+
 import argparse
+import json
+import os
 import sys
-from typing import Any, List, Tuple
+from typing import Any
 
-DEBUG = False
-
-
-def print_debug(string: str) -> None:
-  if DEBUG:
-    print(string)
+NO_DISCRIMINANT = 0xFFFF
 
 
-def create_schema_instance(struct: Any, prop: Tuple[str, Any]) -> Any:
-  """
-  Create a new instance of a schema type, handling different field types.
-
-  Args:
-      struct: The Cap'n Proto schema structure
-      prop: A tuple containing the field name and field metadata
-
-  Returns:
-      A new initialized schema instance
-  """
-  struct_instance = struct.new_message()
-  field_name, field_metadata = prop
-
-  try:
-    field_type = field_metadata.proto.slot.type.which()
-
-    # Initialize different types of fields
-    if field_type in ('list', 'text', 'data'):
-      struct_instance.init(field_name, 1)
-      print_debug(f"Initialized list/text/data field: {field_name}")
-    elif field_type in ('struct', 'object'):
-      struct_instance.init(field_name)
-      print_debug(f"Initialized struct/object field: {field_name}")
-
-    return struct_instance
-
-  except Exception as e:
-    print(f"Error creating instance for {field_name}: {e}")
-    return None
+def hex_id(value: int) -> str:
+  return f"0x{value:016x}"
 
 
-def get_schema_fields(schema_struct: Any) -> List[Tuple[str, Any]]:
-  """
-  Retrieve all fields from a given schema structure.
-
-  Args:
-      schema_struct: The Cap'n Proto schema structure
-
-  Returns:
-      A list of field names and their metadata
-  """
-  try:
-    # Get all fields from the schema
-    schema_fields = list(schema_struct.schema.fields.items())
-
-    print_debug("Discovered schema fields:")
-    for field_name, field_metadata in schema_fields:
-      print_debug(f"- {field_name}")
-
-    return schema_fields
-
-  except Exception as e:
-    print(f"Error retrieving schema fields: {e}")
-    return []
+def encode_struct(schema: Any) -> dict:
+  node = schema.node
+  fields = []
+  for name, field in schema.fields.items():
+    proto = field.proto
+    ordinal = proto.ordinal.explicit if proto.ordinal.which() == "explicit" else None
+    discriminant = proto.discriminantValue if proto.discriminantValue != NO_DISCRIMINANT else None
+    fields.append({"name": name, "ordinal": ordinal, "discriminant": discriminant})
+  return {
+    "typeId": hex_id(node.id),
+    "displayName": node.displayName,
+    "hasUnion": node.struct.discriminantCount > 0,
+    "fields": fields,
+  }
 
 
-def generate_schema_instances(schema_struct: Any) -> List[Any]:
-  """
-  Generate instances for all fields in a given schema.
-
-  Args:
-      schema_struct: The Cap'n Proto schema structure
-
-  Returns:
-      A list of schema instances
-  """
-  schema_fields = get_schema_fields(schema_struct)
-  instances = []
-
-  for field_prop in schema_fields:
-    try:
-      instance = create_schema_instance(schema_struct, field_prop)
-      if instance is not None:
-        instances.append(instance)
-    except Exception as e:
-      print(f"Skipping field due to error: {e}")
-
-  print(f"Generated {len(instances)} schema instances")
-  return instances
+def _child_struct_schema(field: Any) -> Any:
+  proto = field.proto
+  if proto.which() == "group":
+    return field.schema
+  type_node = proto.slot.type
+  which = type_node.which()
+  if which == "struct":
+    return field.schema
+  if which == "list":
+    container = field.schema
+    element_type = type_node.list.elementType
+    while element_type.which() == "list":
+      container = container.elementType
+      element_type = element_type.list.elementType
+    if element_type.which() == "struct":
+      return container.elementType
+  return None
 
 
-def persist_instances(instances: List[Any], filename: str) -> None:
-  """
-  Write schema instances to a binary file.
-
-  Args:
-      instances: List of schema instances
-      filename: Output file path
-  """
-  try:
-    with open(filename, 'wb') as f:
-      for instance in instances:
-        f.write(instance.to_bytes())
-
-    print(f"Successfully wrote {len(instances)} instances to {filename}")
-
-  except Exception as e:
-    print(f"Error persisting instances: {e}")
-    sys.exit(1)
-
-
-def read_instances(filename: str, schema_type: Any) -> List[Any]:
-  """
-  Read schema instances from a binary file.
-
-  Args:
-      filename: Input file path
-      schema_type: The schema type to use for reading
-
-  Returns:
-      A list of read schema instances
-  """
-  try:
-    with open(filename, 'rb') as f:
-      data = f.read()
-
-    instances = list(schema_type.read_multiple_bytes(data))
-
-    print(f"Read {len(instances)} instances from {filename}")
-    return instances
-
-  except Exception as e:
-    print(f"Error reading instances: {e}")
-    sys.exit(1)
+def collect_schema(root: Any) -> dict[str, dict]:
+  structs: dict[str, dict] = {}
+  stack = [root]
+  while stack:
+    schema = stack.pop()
+    type_id = hex_id(schema.node.id)
+    if type_id in structs:
+      continue
+    structs[type_id] = encode_struct(schema)
+    for _name, field in schema.fields.items():
+      try:
+        child = _child_struct_schema(field)
+      except Exception:
+        child = None
+      if child is not None:
+        stack.append(child)
+  return structs
 
 
-def compare_schemas(original_instances: List[Any], read_instances: List[Any]) -> bool:
-  """
-  Compare original and read-back instances to detect potential breaking changes.
-
-  Args:
-      original_instances: List of originally generated instances
-      read_instances: List of instances read back from file
-
-  Returns:
-      Boolean indicating whether schemas appear compatible
-  """
-  if len(original_instances) != len(read_instances):
-    print("❌ Schema Compatibility Warning: Instance count mismatch")
-    return False
-
-  compatible = True
-  for struct in read_instances:
-    try:
-      getattr(struct, struct.which())  # Attempting to access the field to validate readability
-    except Exception as e:
-      print(f"❌ Structural change detected: {struct.which()} is not readable.\nFull error: {e}")
-      compatible = False
-
-  return compatible
+def load_log(cereal_dir: str, extra_imports: list[str] | None = None) -> Any:
+  import capnp
+  cereal_dir = os.path.abspath(cereal_dir)
+  capnp.remove_import_hook()
+  imports = [cereal_dir] + [os.path.abspath(p) for p in (extra_imports or [])]
+  return capnp.load(os.path.join(cereal_dir, "log.capnp"), imports=imports)
 
 
-def main():
-  """
-  CLI entry point for schema compatibility testing.
-  """
-  # Setup argument parser
-  parser = argparse.ArgumentParser(
-    description='Cap\'n Proto Schema Compatibility Testing Tool',
-    epilog='Test schema compatibility by generating and reading back instances.'
-  )
+def dump_schema(cereal_dir: str, path: str, extra_imports: list[str] | None = None) -> None:
+  log = load_log(cereal_dir, extra_imports)
+  payload = {
+    "root": hex_id(log.Event.schema.node.id),
+    "structs": collect_schema(log.Event.schema),
+  }
+  with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+  print(f"wrote schema dump with {len(payload['structs'])} structs to {path}")
 
-  # Add mutually exclusive group for generation or reading mode
-  mode_group = parser.add_mutually_exclusive_group(required=True)
-  mode_group.add_argument('-g', '--generate', action='store_true',
-                          help='Generate schema instances')
-  mode_group.add_argument('-r', '--read', action='store_true',
-                          help='Read and validate schema instances')
 
-  # Common arguments
-  parser.add_argument('-f', '--file',
-                      default='schema_instances.bin',
-                      help='Output/input binary file (default: schema_instances.bin)')
+def compare(sunnypilot_dump: dict, upstream_dump: dict) -> list[str]:
+  violations: list[str] = []
+  sunnypilot_structs = sunnypilot_dump["structs"]
+  upstream_structs = upstream_dump["structs"]
 
-  # Parse arguments
+  for type_id, sp_struct in sunnypilot_structs.items():
+    if not sp_struct["hasUnion"]:
+      continue
+    up_struct = upstream_structs.get(type_id)
+    if up_struct is None:
+      continue
+
+    up_ordinals = {f["ordinal"] for f in up_struct["fields"] if f.get("discriminant") is not None}
+    display = sp_struct["displayName"]
+
+    for field in sp_struct["fields"]:
+      if field.get("discriminant") is None:
+        continue
+      if field["ordinal"] not in up_ordinals:
+        violations.append(
+          f"{display} @{field['ordinal']} '{field['name']}': "
+          f"union variant not present upstream (discriminant={field['discriminant']})"
+        )
+
+  return violations
+
+
+def run_read(cereal_dir: str, peer_path: str, extra_imports: list[str] | None = None) -> int:
+  log = load_log(cereal_dir, extra_imports)
+  with open(peer_path, "r", encoding="utf-8") as f:
+    peer_dump = json.load(f)
+  local_dump = {
+    "root": hex_id(log.Event.schema.node.id),
+    "structs": collect_schema(log.Event.schema),
+  }
+  violations = compare(sunnypilot_dump=peer_dump, upstream_dump=local_dump)
+
+  if not violations:
+    print("cereal compat OK: upstream can parse sunnypilot routes.")
+    return 0
+
+  print(f"cereal compat FAIL ({len(violations)} leaked union variant(s)):")
+  for v in violations:
+    print(f"  {v}")
+  return 1
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description="sunnypilot cereal upstream compat check")
+  mode = parser.add_mutually_exclusive_group(required=True)
+  mode.add_argument("-g", "--generate", action="store_true", help="dump local schema to JSON")
+  mode.add_argument("-r", "--read", action="store_true", help="validate against peer schema")
+  parser.add_argument("-f", "--file", default="schema.json", help="JSON file path")
+  parser.add_argument("--cereal-dir", required=True, help="path to cereal directory")
+  parser.add_argument("-I", "--import-path", action="append", default=[], help="extra capnp import paths")
   args = parser.parse_args()
 
-  # Import the schema dynamically 
-  try:
-    from cereal import log
-    schema_type = log.Event
-  except ImportError:
-    print("Error: Unable to import schema. Ensure 'cereal' is installed.")
-    sys.exit(1)
-
-  # Execute based on mode
   if args.generate:
-    print("🔧 Generating Schema Instances")
-    instances = generate_schema_instances(schema_type)
-    persist_instances(instances, args.file)
-    print("✅ Instance generation complete")
-
-  elif args.read:
-    print("🔍 Reading and Validating Schema Instances")
-    generated_instances = generate_schema_instances(schema_type)
-    read_back_instances = read_instances(args.file, schema_type)
-
-    # Compare schemas
-    if compare_schemas(generated_instances, read_back_instances):
-      print("✅ Schema Compatibility: No breaking changes detected")
-      sys.exit(0)
-    else:
-      print("❌ Potential Schema Breaking Changes Detected")
-      sys.exit(1)
+    dump_schema(args.cereal_dir, args.file, args.import_path)
+    return 0
+  return run_read(args.cereal_dir, args.file, args.import_path)
 
 
 if __name__ == "__main__":
-  main()
+  sys.exit(main())
