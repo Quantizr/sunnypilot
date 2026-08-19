@@ -12,3 +12,6 @@
 
 openpilot/selfdrive/car/tests/test_models_segs.txt filter=lfs diff=lfs merge=lfs -text
 openpilot/common/hardware/comma/updater filter=lfs diff=lfs merge=lfs -text
+
+# Little Lebowski DSP model onnx: store as normal git blobs, not LFS (no LFS server for this branch)
+openpilot/sunnypilot/modeld_v2/models/distill*.onnx filter= diff= merge= -text

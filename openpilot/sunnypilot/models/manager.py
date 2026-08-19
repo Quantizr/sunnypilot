@@ -17,10 +17,14 @@ from openpilot.common.hardware.hw import Paths
 
 from openpilot.cereal import messaging, custom
 from openpilot.sunnypilot.models.fetcher import ModelFetcher
-from openpilot.sunnypilot.models.helpers import get_active_bundle, validate_active_bundle, verify_file
+from openpilot.sunnypilot.models.helpers import get_active_bundle, validate_active_bundle, verify_file, REQUIRED_JSON_VERSION
 
 # (connect, read) seconds. read is per-request inactivity, not a total cap
 DOWNLOAD_TIMEOUT = (30, 30)
+
+_LITTLE_LB_DSP_INDEX = 10001
+_LITTLE_LB_DSP_PKL = os.path.normpath(os.path.join(
+  os.path.dirname(os.path.abspath(__file__)), "..", "modeld_v2", "models", "little_lebowski_tinygrad.pkl"))
 
 
 class ModelManagerSP:
@@ -249,13 +253,49 @@ class ModelManagerSP:
     """Main entry point for downloading a model bundle"""
     asyncio.run(self._download_bundle(model_bundle, destination_path))
 
+  def _inject_little_lb_dsp_bundle(self, bundles: list) -> list:
+    """TEMPORARY: append a synthetic bundle for the locally-built DSP model so it shows in the picker without a
+    remote-JSON entry. Gated on the scons-built pkl existing (only built on the comma device, see modeld_v2's
+    SConscript), so it auto-hides on PC / non-DSP builds. The artifact fileName is the ABSOLUTE baked-pkl path:
+    _find_driving_pkl does os.path.join(model_root, fileName), and os.path.join returns an absolute right-hand
+    side unchanged, so modeld loads it straight from the source tree -- no download, no copy. Empty downloadUri
+    => the manager's download step is a no-op. Remove this method (and its call + the module TEMPORARY block)
+    once the DSP bundle ships in the remote models JSON."""
+    from openpilot.common.file_chunker import get_manifest_path
+    if not (os.path.exists(_LITTLE_LB_DSP_PKL) or os.path.exists(get_manifest_path(_LITTLE_LB_DSP_PKL))):
+      return bundles
+    if any(b.index == _LITTLE_LB_DSP_INDEX for b in bundles):
+      return bundles
+    b = custom.ModelManagerSP.ModelBundle()
+    b.index = _LITTLE_LB_DSP_INDEX
+    b.internalName = "little_lb_dsp"
+    b.displayName = "Little Lebowski"
+    b.generation = 11
+    b.runner = custom.ModelManagerSP.Runner.tinygrad
+    b.is20hz = False
+    b.environment = "release"
+    b.ref = "little_lb_dsp"
+    b.minimumSelectorVersion = REQUIRED_JSON_VERSION
+    long_override = custom.ModelManagerSP.Override()
+    long_override.key, long_override.value = 'long', '0.3'
+    b.overrides = [long_override]
+    m = custom.ModelManagerSP.Model()
+    m.type = custom.ModelManagerSP.Model.Type.supercombo
+    artifact = custom.ModelManagerSP.Artifact()
+    artifact.fileName = _LITTLE_LB_DSP_PKL
+    artifact.downloadProgress.status = custom.ModelManagerSP.DownloadStatus.cached
+    artifact.downloadProgress.progress = 100
+    m.artifact = artifact
+    b.models = [m]
+    return list(bundles) + [b]
+
   def main_thread(self) -> None:
     """Main thread for model management"""
     rk = Ratekeeper(1, print_delay_threshold=None)
 
     while True:
       try:
-        self.available_models = self.model_fetcher.get_available_bundles()
+        self.available_models = self._inject_little_lb_dsp_bundle(self.model_fetcher.get_available_bundles())
         validate_active_bundle(self.params, self.available_models)
         self.active_bundle = get_active_bundle(self.params)
 

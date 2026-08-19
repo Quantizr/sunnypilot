@@ -37,9 +37,12 @@ from tinygrad.device import Device
 from tinygrad.engine.jit import TinyJit
 from tinygrad.tensor import Tensor
 
-MODEL_TYPES = ('vision_policy', 'supercombo', 'vision_multi_policy')
+MODEL_TYPES = ('vision_policy', 'supercombo', 'vision_multi_policy', 'supercombo_dsp')
 WARP_INPUTS = ['tfm', 'big_tfm']
 POLICY_INPUTS = ['img_q', 'big_img_q', 'feat_q', 'desire_q', 'packed_npy_inputs']
+VISION_INPUTS = ['img_q', 'big_img_q']
+POLICY_SPLIT_INPUTS = ['feat_q', 'desire_q', 'packed_npy_inputs']
+DSP_FEATURE_KEY = 'linear_80'
 WARP_DEV = os.getenv('WARP_DEV')
 
 
@@ -136,6 +139,18 @@ def make_supercombo_input_queues(input_shapes: dict, frame_skip: int,
   return generate_queues_and_npy(input_shapes, frame_skip, device, is_supercombo=True)
 
 
+def dsp_policy_shapes(input_shapes: dict) -> dict:
+  """The policy input shapes minus the DSP feature -- what actually gets packed into packed_npy_inputs."""
+  return {k: v for k, v in input_shapes.items() if k != DSP_FEATURE_KEY}
+
+
+def make_supercombo_dsp_input_queues(input_shapes: dict, frame_skip: int,
+                                     device: str = Device.DEFAULT) -> tuple[dict, dict]:
+  """Like make_supercombo_input_queues, but for the DSP split: linear_80 (the DSP vision feature) is handed to
+  run_policy at call time, so it must not be packed into packed_npy_inputs the way every other npy input is."""
+  return generate_queues_and_npy(dsp_policy_shapes(input_shapes), frame_skip, device, is_supercombo=True)
+
+
 def make_random_images(keys, shape, device):
   return {k: Tensor.randint(shape, low=0, high=256, dtype=dtypes.uint8, device=device).realize() for k in keys}
 
@@ -220,6 +235,64 @@ def make_run_policy(vision_runner, policy_runners: list, features_slice: slice, 
     return policy_out
 
   return run_policy
+
+
+def make_run_seed(frame_skip, pad_ch):
+  """DSP split, vision half (GPU): sample the img rings and stack them into the u8 seed the DSP model takes.
+
+  A concat and nothing else -- the stem lives INSIDE the fused DSP graph. That works only because the fused
+  model's seed quant is pinned to (1/128, 128) (`distill.export_vision_single --pin-seed`), making DQ(u8) ==
+  (u8-128)/128 exactly, i.e. the model's own normalisation, so the warped camera BYTES already are the seed.
+  Layout |img 12|big 12|pad `pad_ch`| matches the exporter's `stack_frames`; the pad only reaches a multiple
+  of 32 and its weights are structurally zero.
+  """
+  sample_skip_fn = partial(sample_skip, frame_skip=frame_skip)
+  def run_seed(warped, img_q, big_img_q):
+    warped = warped.to(Device.DEFAULT)
+    Tensor.realize(warped)
+    seed = shift_and_sample(img_q, warped[0:1], sample_skip_fn).cat(shift_and_sample(big_img_q, warped[1:2], sample_skip_fn), dim=1)
+    if pad_ch:
+      seed = seed.cat(Tensor.zeros(1, pad_ch, *seed.shape[2:], dtype=seed.dtype, device=seed.device), dim=1)
+    return seed.permute(0, 2, 3, 1),
+  return run_seed
+
+
+def make_run_policy_split(policy_runner, input_shapes: dict, frame_skip: int):
+  """DSP split, policy half (GPU): make_run_policy minus the vision half -- the feature comes from the DSP as
+  `linear_80` instead of from a tower here, and prev_feat/the rings stay exactly as the fused path packs them."""
+  sample_desire_fn = partial(sample_desire, frame_skip=frame_skip)
+  sample_skip_fn = partial(sample_skip, frame_skip=frame_skip)
+  desire_key = _detect_desire_key(input_shapes)
+  if not desire_key:
+    raise ValueError("Desire key missing from input shapes.")
+  npy_shapes, npy_sizes = get_policy_npy_shapes(dsp_policy_shapes(input_shapes), is_supercombo=True)
+
+  def run_policy(linear_80, feat_q, desire_q, packed_npy_inputs):
+    linear_80, packed_npy_inputs = linear_80.to(Device.DEFAULT), packed_npy_inputs.to(Device.DEFAULT)
+    Tensor.realize(linear_80, packed_npy_inputs)
+
+    unpacked = dict(zip(npy_shapes.keys(),
+                        (t.reshape(shape) for t, shape in zip(packed_npy_inputs.split(npy_sizes), npy_shapes.values(), strict=True)),
+                        strict=True))
+    inputs = {
+      'linear_80': linear_80,
+      'features_buffer': shift_and_sample(feat_q, unpacked['prev_feat'].reshape(1, 1, -1), sample_skip_fn),
+      desire_key: shift_and_sample(desire_q, unpacked['desire'].reshape(1, 1, -1), sample_desire_fn),
+    }
+    for key, value in unpacked.items():
+      if key not in ('desire', 'prev_feat'):
+        inputs[key] = value
+    return next(iter(policy_runner(inputs).values())).cast('float32')
+  return run_policy
+
+
+def build_megakernel_dsp(dsp_onnx):
+  """ONNX -> the megakernel (.so, op list, weights, layout) as picklable plain data, NOT DSP tensors: modeld
+  realizes them onto Device["DSP"] itself."""
+  from openpilot.sunnypilot.modeld_v2.dsp.compile.build import build
+  lib, src, layout, data = build(dsp_onnx)
+  return {'lib': lib, 'src': src, 'layout': layout,
+          'wts': data["wts"].astype(np.uint8), 'oplist': data["ops"].astype(np.int32)}
 
 
 def compile_jit(jit, make_random_inputs, input_keys, make_queues):
@@ -322,6 +395,7 @@ if __name__ == "__main__":
   parser.add_argument('--off-policy-onnx', help='off-policy ONNX (for vision_multi_policy)')
   parser.add_argument('--on-policy-onnx', help='on-policy ONNX (for vision_multi_policy)')
   parser.add_argument('--supercombo-onnx', help='supercombo ONNX (for supercombo)')
+  parser.add_argument('--dsp-onnx', help='int8 vision ONNX, stem INCLUDED (for supercombo_dsp); compiled here into the DSP megakernel')
 
   args = parser.parse_args()
   model_w, model_h = args.model_size
@@ -332,6 +406,7 @@ if __name__ == "__main__":
   args.off_policy_onnx = read_file_chunked_to_shm(args.off_policy_onnx)
   args.on_policy_onnx = read_file_chunked_to_shm(args.on_policy_onnx)
   args.supercombo_onnx = read_file_chunked_to_shm(args.supercombo_onnx)
+  args.dsp_onnx = read_file_chunked_to_shm(args.dsp_onnx)
 
   vision_runner = OnnxRunner(args.vision_onnx) if args.vision_onnx else None
 
@@ -343,6 +418,14 @@ if __name__ == "__main__":
     assert args.supercombo_onnx
     policy_runners = [OnnxRunner(args.supercombo_onnx)]
     output_data['metadata'] = {'model': make_metadata_dict(args.supercombo_onnx)}
+  elif args.model_type == 'supercombo_dsp':
+    assert args.policy_onnx and args.dsp_onnx, "supercombo_dsp needs --policy-onnx and --dsp-onnx"
+    policy_runners = [OnnxRunner(args.policy_onnx)]
+    dsp_metadata = make_metadata_dict(args.policy_onnx)
+    dsp_metadata['input_shapes'].update(dict.fromkeys(('img', 'big_img'), (1, 12, model_h // 2, model_w // 2)))
+    dsp_metadata['dsp'] = True
+    output_data['metadata'] = {'model': dsp_metadata}
+    output_data['dsp_mk'] = build_megakernel_dsp(args.dsp_onnx)
   elif args.model_type == 'vision_multi_policy':
     assert vision_runner
     policy_runners, policy_names = _load_policy_runners(args)
@@ -359,15 +442,29 @@ if __name__ == "__main__":
   all_shapes = {key: value for meta in output_data['metadata'].values() for key, value in meta['input_shapes'].items()}
   feat_meta = output_data['metadata'].get('vision') or output_data['metadata'].get('model') or output_data['metadata'].get('policy')
   assert feat_meta is not None
-  features_slice = feat_meta['output_slices']['hidden_state']
+  features_slice = feat_meta['output_slices'].get('hidden_state')
   is_supercombo = vision_runner is None
 
-  print(f"Compiling run_policy JIT (model_size={model_w}x{model_h}, frame_skip={derived_frame_skip})...")
-  run_policy_func = make_run_policy(vision_runner, policy_runners, features_slice, derived_frame_skip, all_shapes)
-  run_policy_jit = TinyJit(run_policy_func, prune=True)
-  make_policy_queues = partial(generate_queues_and_npy, all_shapes, derived_frame_skip, is_supercombo=is_supercombo)
-  make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=WARP_DEV)
-  output_data['run_policy'] = compile_jit(run_policy_jit, make_random_model_inputs, POLICY_INPUTS, make_policy_queues)
+  is_dsp = args.model_type == 'supercombo_dsp'
+  if is_dsp:
+    make_policy_queues = partial(make_supercombo_dsp_input_queues, all_shapes, derived_frame_skip)
+    seed_ch = output_data['dsp_mk']['layout'].seed_bytes // (all_shapes['img'][2] * all_shapes['img'][3])
+    print(f"Compiling run_seed JIT (seed_channels={seed_ch}, frame_skip={derived_frame_skip})...")
+    run_seed_jit = TinyJit(make_run_seed(derived_frame_skip, seed_ch - 24), prune=True)
+    make_random_seed_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, *all_shapes['img'][2:]), device=WARP_DEV)
+    output_data['run_seed'] = compile_jit(run_seed_jit, make_random_seed_inputs, VISION_INPUTS, make_policy_queues)
+
+    print(f"Compiling run_policy JIT (DSP split, model_size={model_w}x{model_h}, frame_skip={derived_frame_skip})...")
+    run_policy_jit = TinyJit(make_run_policy_split(policy_runners[0], all_shapes, derived_frame_skip), prune=True)
+    make_random_model_inputs = lambda: {'linear_80': Tensor(Tensor.randn(*all_shapes['linear_80']).numpy(), device='NPY').realize()}  # noqa: E731
+  else:
+    print(f"Compiling run_policy JIT (model_size={model_w}x{model_h}, frame_skip={derived_frame_skip})...")
+    run_policy_func = make_run_policy(vision_runner, policy_runners, features_slice, derived_frame_skip, all_shapes)
+    run_policy_jit = TinyJit(run_policy_func, prune=True)
+    make_policy_queues = partial(generate_queues_and_npy, all_shapes, derived_frame_skip, is_supercombo=is_supercombo)
+    make_random_model_inputs = partial(make_random_images, keys=['warped'], shape=(2, 6, model_h // 2, model_w // 2), device=WARP_DEV)
+  output_data['run_policy'] = compile_jit(run_policy_jit, make_random_model_inputs,
+                                          POLICY_SPLIT_INPUTS if is_dsp else POLICY_INPUTS, make_policy_queues)
 
   for cam_w, cam_h in args.camera_resolutions:
     print(f"Compiling warp JIT for {cam_w}x{cam_h}...")

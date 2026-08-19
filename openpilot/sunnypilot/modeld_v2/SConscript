@@ -1,0 +1,66 @@
+import glob
+import os
+
+from SCons.Script import Value
+from openpilot.common.file_chunker import get_manifest_path
+from openpilot.common.transformations.camera import _ar_ox_fisheye, _os_fisheye
+from openpilot.common.transformations.model import MEDMODEL_INPUT_SIZE
+from openpilot.selfdrive.modeld.constants import ModelConstants
+
+Import('env', 'arch')
+lenv = env.Clone()
+
+# The Little Lebowski DSP model: the int8 vision student (stem INCLUDED) is compiled into a Hexagon megakernel and
+# runs on the cDSP, the policy on the GPU. The cDSP only exists on the comma device, so this is the one thing this
+# SConscript builds and it never builds anywhere else. MODELD_FUSED=1 skips it.
+MODELD_DSP = arch == 'comma_arm64' and not bool(os.getenv('MODELD_FUSED'))
+
+dsp_vision_onnx = File("models/distill_vision_v3.onnx")
+dsp_policy_onnx = File("models/distill_policy.onnx")
+
+if MODELD_DSP and all(os.path.isfile(f.abspath) for f in (dsp_vision_onnx, dsp_policy_onnx)):
+  tinygrad_root = env.Dir("#").abspath
+  tinygrad_files = ["#"+x for x in glob.glob(env.Dir("#tinygrad_repo").relpath + "/**", recursive=True, root_dir=tinygrad_root)
+                    if 'pycache' not in x and os.path.isfile(os.path.join(tinygrad_root, x))]
+
+  tg_flags = 'DEV=QCOM IMAGE=1 FLOAT16=1 NOLOCALS=1 JIT_BATCH_SIZE=0 OPENPILOT_HACKS=1'
+  pythonpath_string = 'PYTHONPATH="${PYTHONPATH}:' + env.Dir("#tinygrad_repo").abspath + ':' + env.Dir("#").abspath + '"'
+  # CPU 7 is isolated with isolcpus on AGNOS, so explicitly pin the compiler to it.
+  taskset = 'taskset -c 7 '
+
+  CAMERA_CONFIGS = [
+    (_ar_ox_fisheye.width, _ar_ox_fisheye.height),  # tici: 1928x1208
+    (_os_fisheye.width, _os_fisheye.height),        # mici: 1344x760
+  ]
+  camera_res_args = ' '.join(f'{cw}x{ch}' for cw, ch in CAMERA_CONFIGS)
+  model_w, model_h = MEDMODEL_INPUT_SIZE
+  frame_skip = ModelConstants.MODEL_RUN_FREQ // ModelConstants.MODEL_CONTEXT_FREQ
+
+  modeld_v2_dir = Dir("#openpilot/sunnypilot/modeld_v2").abspath
+  dsp_dir = f"{modeld_v2_dir}/dsp"
+  # Everything that decides the kernel: the megakernel C, the compiler that emits its op list, and the vendored
+  # HVX asm + ld.lld. GLOB the .S rather than list them -- a hand-written list went stale three separate ways
+  # (named deleted files, named unlinked asm, covered 3 of the 10 actually linked) and under-declaring here
+  # silently ships a stale kernel, while over-declaring costs one spurious rebuild.
+  dsp_srcs = ([File(f"{dsp_dir}/megakernel.py"), File(f"{dsp_dir}/testsig.py"), File(f"{dsp_dir}/compile/lib/ld.lld")]
+              + [File(f"{dsp_dir}/compile/{f}") for f in ('build.py', 'lower.py', 'parse.py', 'megakernel.c')]
+              + [File(f) for f in glob.glob(f"{dsp_dir}/compile/lib/*.S")])
+  script_deps = [File(f"{modeld_v2_dir}/compile_modeld.py"),
+                 File("#openpilot/selfdrive/modeld/compile_modeld.py"),
+                 File("#openpilot/selfdrive/modeld/get_model_metadata.py")]
+
+  # --policy-onnx is the policy half only (its metadata carries output_slices); the vision half is --dsp-onnx and
+  # is compiled into the megakernel inside compile_modeld, so both halves land in this one pkl.
+  pkl_path = File("models/little_lebowski_tinygrad.pkl").abspath
+  cmd = (f'{pythonpath_string} {tg_flags} {taskset}python3 {modeld_v2_dir}/compile_modeld.py '
+         f'--model-type supercombo_dsp --model-size {model_w}x{model_h} '
+         f'--camera-resolutions {camera_res_args} '
+         f'--policy-onnx {dsp_policy_onnx.abspath} --dsp-onnx {dsp_vision_onnx.abspath} '
+         f'--frame-skip {frame_skip} --output {pkl_path}')
+
+  # compile_modeld chunks --output and DELETES the original, so the pkl itself is never a valid target -- scons
+  # would see a missing target and rebuild the megakernel every run. It also picks its own chunk count from the
+  # finished pkl's size, which is not knowable here, so the manifest (one file, always written last) is the target.
+  lenv.Command(get_manifest_path(pkl_path),
+               tinygrad_files + script_deps + dsp_srcs + [dsp_vision_onnx, dsp_policy_onnx, Value(cmd)],
+               cmd)

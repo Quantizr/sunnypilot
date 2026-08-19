@@ -41,7 +41,9 @@ from openpilot.sunnypilot.modeld_v2.fill_model_msg import fill_model_msg, fill_p
 from openpilot.sunnypilot.modeld_v2.constants import Plan
 from openpilot.sunnypilot.modeld_v2.meta_helper import load_meta_constants
 from openpilot.sunnypilot.modeld_v2.camera_offset_helper import CameraOffsetHelper
-from openpilot.sunnypilot.modeld_v2.compile_modeld import derive_frame_skip, make_split_input_queues, make_supercombo_input_queues, WARP_INPUTS, POLICY_INPUTS
+from openpilot.sunnypilot.modeld_v2.compile_modeld import (derive_frame_skip, make_split_input_queues, make_supercombo_input_queues,
+                                                          make_supercombo_dsp_input_queues, WARP_INPUTS, POLICY_INPUTS,
+                                                          VISION_INPUTS, POLICY_SPLIT_INPUTS)
 
 from openpilot.sunnypilot.livedelay.helpers import get_lat_delay
 from openpilot.sunnypilot.modeld_v2.modeld_base import ModelStateBase
@@ -78,6 +80,25 @@ class FrameMeta:
   def __init__(self, vipc=None):
     if vipc is not None:
       self.frame_id, self.timestamp_sof, self.timestamp_eof = vipc.frame_id, vipc.timestamp_sof, vipc.timestamp_eof
+
+
+class DSPVision:
+  """The whole int8 vision student (stem included) as ONE megakernel invoke on the Hexagon, run inline in the
+  policy's frame -- it is ~11.7ms against a 50ms budget, so paying it inline is cheaper than the frame of
+  latency a pipelined version costs (and which `frame_delay` then has to compensate for)."""
+  def __init__(self, mk):
+    from tinygrad.engine.jit import TinyJit
+    from openpilot.sunnypilot.modeld_v2.dsp.megakernel import megakernel
+    wts = Tensor(np.ascontiguousarray(mk['wts'], np.uint8), device="DSP").realize()
+    ops = Tensor(np.ascontiguousarray(mk['oplist'], np.int32), device="DSP").realize()
+    n = mk['layout'].seed_bytes
+    self.seed = Tensor(np.zeros(n, np.uint8), device="DSP").contiguous().realize()
+    self.seed_mv = np.asarray(self.seed.uop.buffer.as_memoryview(force_zero_copy=True))
+    self.run = TinyJit(lambda s: megakernel(s, wts, ops, mk['lib'], mk['src'], mk['layout']).realize())
+
+  def __call__(self, seed_np: np.ndarray) -> np.ndarray:
+    self.seed_mv[:] = seed_np.reshape(-1)
+    return self.run(self.seed).numpy().reshape(-1).astype(np.float32)
 
 
 class ModelState(ModelStateBase):
@@ -130,9 +151,16 @@ class ModelState(ModelStateBase):
       self._combined_model_type = 'supercombo'
       self._vision_input_names = [key for key in model_metadata['input_shapes'] if 'img' in key]
       frame_skip = derive_frame_skip({}, model_metadata['input_shapes'])
-      self.input_queues, self.numpy_inputs = make_supercombo_input_queues(model_metadata['input_shapes'],
-                                                                          frame_skip, device=self.QUEUE_DEV)
+      self.dsp = bool(model_metadata.get('dsp', False))
+      make_queues = make_supercombo_dsp_input_queues if self.dsp else make_supercombo_input_queues
+      self.input_queues, self.numpy_inputs = make_queues(model_metadata['input_shapes'],
+                                                         frame_skip, device=self.QUEUE_DEV)
+      if self.dsp:
+        from openpilot.sunnypilot.modeld_v2.dsp.testsig import ensure_testsig
+        ensure_testsig()
+        self.run_seed, self.vision = jits['run_seed'], DSPVision(jits['dsp_mk'])
     else:
+      self.dsp = False
       vision_metadata = metadata['vision']
       policy_keys = [k for k in metadata if k != 'vision']
       if policy_keys == ['policy']:
@@ -251,14 +279,23 @@ class ModelState(ModelStateBase):
         self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
         return None
       warped = self.warp(**{k: self.input_queues[k] for k in WARP_INPUTS}, frame=self.full_frames[road_key], big_frame=self.full_frames[wide_key])
-      raw_outputs = self.run_policy(**{k: self.input_queues[k] for k in POLICY_INPUTS if k in self.input_queues}, warped=warped)
+      if self.dsp:
+        seed, = self.run_seed(**{k: self.input_queues[k] for k in VISION_INPUTS}, warped=warped)
+        dsp_feat = self.vision(seed.numpy()[0])
+        policy_inputs = {'linear_80': Tensor(dsp_feat.reshape(1, -1), device='NPY').realize()}
+      else:
+        policy_inputs = {'warped': warped}
+      raw_outputs = self.run_policy(
+        **{k: self.input_queues[k] for k in (POLICY_SPLIT_INPUTS if self.dsp else POLICY_INPUTS) if k in self.input_queues},
+        **policy_inputs,
+      )
 
     if self._combined_model_type == 'supercombo':
       model_output = raw_outputs.numpy().flatten()
       sliced = {k: model_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
       outputs = self.parser.parse_outputs(sliced)
       if 'prev_feat' in self.numpy_inputs:
-        self.numpy_inputs['prev_feat'][:] = model_output[self.vision_output_slices['hidden_state']]
+        self.numpy_inputs['prev_feat'][:] = dsp_feat if self.dsp else model_output[self.vision_output_slices['hidden_state']]
     else:
       vision_output = raw_outputs[0].numpy().flatten()
       vision_sliced = {k: vision_output[np.newaxis, v] for k, v in self.vision_output_slices.items()}
