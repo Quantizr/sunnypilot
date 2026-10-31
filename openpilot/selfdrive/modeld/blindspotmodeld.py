@@ -28,9 +28,13 @@ MODEL_PKL_PATH = MODELS_DIR / 'bsm_model_tinygrad.pkl'
 MODEL_W, MODEL_H = 448, 128
 N_FRAMES = 3
 FRAME_STEP = 4  # cabin camera runs at 20 fps, the model at 5 Hz
-DT_FRAME = 0.05
-# binary detection: (probability threshold, minimum on-time after the last step at or above it), longest hold wins
-DETECT_HOLDS = ((0.5, 1.0), (0.3, 0.5))
+DT_STEP = FRAME_STEP * 0.05
+# on/off detection: a leaky bucket per side on the model probability,
+#   s <- min(1, max(0, s - DECAY * dt) + GAIN * max(0, p - FLOOR)), on while s >= THRESHOLD and for at least MIN_ON s after.
+# The floor keeps a cabin's background level from filling it; a full bucket drains to the threshold in 1.2 s (+ MIN_ON), so a
+# detection lingers at most ~2.2 s after the evidence stops. (= a bucket capped at 0.5 with gain 1, decay 0.25/s, threshold
+# 0.2, scaled by 2 so it reads 0-1.)
+BUCKET_FLOOR, BUCKET_GAIN, BUCKET_DECAY, BUCKET_THRESHOLD, MIN_ON = 0.2, 2.0, 0.5, 0.4, 1.0
 
 # training geometry: a 964x604 canvas (the 1928x1208 f=567 cabin image at half resolution; the 1344x760 f=425.25 image is
 # scaled to the same focal length and centred), cropped to columns 34-930 and canvas rows 144-400 (the model band)
@@ -56,16 +60,18 @@ def model_to_camera(cam_w: int, cam_h: int) -> np.ndarray:
 
 
 class Detector:
-  """per-side on/off signal: on at p >= 0.3, held 0.5 s after the last step >= 0.3 and 1 s after the last step >= 0.5.
-  Holds don't stack: the one ending latest wins."""
+  """per-side on/off signal from the leaky bucket (BUCKET_*, MIN_ON), updated once per model step"""
   def __init__(self):
-    self.on_until = -1.0
+    self.level = 0.0
+    self.hold = 0.0  # seconds the detection stays on after the level drops below the threshold
 
-  def update(self, p: float, t: float) -> bool:
-    for thresh, hold in DETECT_HOLDS:
-      if p >= thresh:
-        self.on_until = max(self.on_until, t + hold)
-    return t < self.on_until - 1e-6
+  def update(self, p: float, dt: float = DT_STEP) -> bool:
+    self.level = min(1.0, max(0.0, self.level - BUCKET_DECAY * dt) + BUCKET_GAIN * max(0.0, p - BUCKET_FLOOR))
+    if self.level >= BUCKET_THRESHOLD:
+      self.hold = MIN_ON
+      return True
+    self.hold -= dt
+    return self.hold > 1e-6
 
 
 class ModelState:
@@ -152,9 +158,9 @@ def main():
     bs.leftProb, bs.rightProb = float(probs[0]), float(probs[1])
     bs.leftAdjacentProb, bs.rightAdjacentProb = float(probs[2]), float(probs[3])
     bs.leftApproachingProb, bs.rightApproachingProb = float(probs[4]), float(probs[5])
-    t = frame_id * DT_FRAME
-    bs.leftDetected = detectors[0].update(bs.leftProb, t)
-    bs.rightDetected = detectors[1].update(bs.rightProb, t)
+    bs.leftDetected = detectors[0].update(bs.leftProb)
+    bs.rightDetected = detectors[1].update(bs.rightProb)
+    bs.leftLevel, bs.rightLevel = detectors[0].level, detectors[1].level
     bs.modelExecutionTime = time.perf_counter() - t1
     bs.gpuExecutionTime = gpu_time
     pm.send("blindSpotModelSP", msg)

@@ -496,10 +496,12 @@ struct BlindSpotModelSP @0xcb9fd56c7057593a {
   rightApproachingProb @6 :Float32;
   modelExecutionTime @7 :Float32;
   gpuExecutionTime @8 :Float32;
-  # car in the blind spot: on while leftProb/rightProb >= 0.3, held 0.5 s after the last step >= 0.3 and
-  # 1 s after the last step >= 0.5 (whichever ends later)
+  # car in the blind spot: a leaky bucket per side on leftProb/rightProb (level <- min(1, max(0, level - 0.5 * dt) +
+  # 2 * max(0, prob - 0.2))), detected while level >= 0.4 and for at least 1 s after; the level is what the UI bars show
   leftDetected @9 :Bool;
   rightDetected @10 :Bool;
+  leftLevel @11 :Float32;
+  rightLevel @12 :Float32;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {
