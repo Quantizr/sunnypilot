@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 import pyray as rl
 
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.sunnypilot.onroad.blind_spot_bars import model_blindspot
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.filter_simple import FirstOrderFilter
 
@@ -22,9 +23,10 @@ class BlindSpotIndicators:
   def update(self) -> None:
     sm = ui_state.sm
     CS = sm['carState']
+    model_left, model_right = model_blindspot()
 
-    self._blind_spot_left_alpha_filter.update(1.0 if CS.leftBlindspot else 0.0)
-    self._blind_spot_right_alpha_filter.update(1.0 if CS.rightBlindspot else 0.0)
+    self._blind_spot_left_alpha_filter.update(1.0 if CS.leftBlindspot or model_left else 0.0)
+    self._blind_spot_right_alpha_filter.update(1.0 if CS.rightBlindspot or model_right else 0.0)
 
   @property
   def detected(self) -> bool:

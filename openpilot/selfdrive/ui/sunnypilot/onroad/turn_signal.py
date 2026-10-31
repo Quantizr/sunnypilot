@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass
 
 from openpilot.selfdrive.ui.ui_state import ui_state
+from openpilot.selfdrive.ui.sunnypilot.onroad.blind_spot_bars import model_blindspot
 from openpilot.selfdrive.ui.mici.onroad.alert_renderer import IconSide, TURN_SIGNAL_BLINK_PERIOD
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.widgets import Widget
@@ -88,9 +89,10 @@ class TurnSignalController:
 
   def update(self):
     CS = ui_state.sm['carState']
+    model_left, model_right = model_blindspot()
 
-    self._update_signal(self._left_signal, CS.leftBlindspot, CS.leftBlinker)
-    self._update_signal(self._right_signal, CS.rightBlindspot, CS.rightBlinker)
+    self._update_signal(self._left_signal, CS.leftBlindspot or model_left, CS.leftBlinker)
+    self._update_signal(self._right_signal, CS.rightBlindspot or model_right, CS.rightBlinker)
 
   def render(self, rect: rl.Rectangle):
     if not ui_state.turn_signals and not ui_state.blindspot:

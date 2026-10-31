@@ -70,3 +70,16 @@ for cam_w, cam_h in [] if os.getenv('SKIP_TINYGRAD_COMPILE') else camera_configs
          f'--frame {cam_w},{cam_h},{stride},{y_height},{uv_height},{frame_size} --warp-to {dm_w}x{dm_h} '
          f'--layout luma --border-fill 16 --transform-device NPY --output {dm_pkl_path}')
   lenv.Command(dm_pkl_path, tinygrad_files + warp_deps + [Value(cmd)], cmd)
+
+# blind spot model (blindspotmodeld.py): fp16 ONNX from the driver-camera BSM project + a per-camera warp of the model band
+# (448x128, yuv420 planes, one new frame per 5 Hz step)
+BSM_W, BSM_H = 448, 128
+if not os.getenv('SKIP_TINYGRAD_COMPILE'):
+  compile_model('models/bsm_model.onnx', 'models/bsm_model_tinygrad.pkl')
+for cam_w, cam_h in [] if os.getenv('SKIP_TINYGRAD_COMPILE') else camera_configs:
+  bsm_warp_path = File(f"models/bsm_warp_{cam_w}x{cam_h}_tinygrad.pkl").abspath
+  stride, y_height, uv_height, frame_size = get_nv12_info(cam_w, cam_h)
+  cmd = (f'{tg_flags} {mac_brew_string} python3 "{compiler}/compile_warp.py" '
+         f'--frame {cam_w},{cam_h},{stride},{y_height},{uv_height},{frame_size} --warp-to {BSM_W}x{BSM_H} '
+         f'--layout yuv420 --frames 1 --transform-device NPY --output {bsm_warp_path}')
+  lenv.Command(bsm_warp_path, tinygrad_files + warp_deps + [Value(cmd)], cmd)

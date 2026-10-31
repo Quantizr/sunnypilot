@@ -483,7 +483,23 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+# blind spot detection from the driver (cabin) camera: openpilot/selfdrive/modeld/blindspotmodeld.py, 5 Hz
+# probabilities are per vehicle side (left = driver's left in a LHD car), not per image side
+struct BlindSpotModelSP @0xcb9fd56c7057593a {
+  frameId @0 :UInt32;
+  leftProb @1 :Float32;
+  rightProb @2 :Float32;
+  # auxiliary heads: car directly beside us vs approaching from behind
+  leftAdjacentProb @3 :Float32;
+  rightAdjacentProb @4 :Float32;
+  leftApproachingProb @5 :Float32;
+  rightApproachingProb @6 :Float32;
+  modelExecutionTime @7 :Float32;
+  gpuExecutionTime @8 :Float32;
+  # car in the blind spot: on while leftProb/rightProb >= 0.3, held 0.5 s after the last step >= 0.3 and
+  # 1 s after the last step >= 0.5 (whichever ends later)
+  leftDetected @9 :Bool;
+  rightDetected @10 :Bool;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

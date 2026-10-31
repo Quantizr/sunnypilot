@@ -14,6 +14,7 @@ from openpilot.selfdrive.ui.sunnypilot.onroad.rocket_fuel import RocketFuel
 from openpilot.selfdrive.ui.sunnypilot.onroad.speed_limit import SpeedLimitRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.smart_cruise_control import SmartCruiseControlRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.turn_signal import TurnSignalController
+from openpilot.selfdrive.ui.sunnypilot.onroad.blind_spot_bars import BlindSpotBars
 from openpilot.selfdrive.ui.sunnypilot.onroad.circular_alerts import CircularAlertsRenderer
 from openpilot.selfdrive.ui.sunnypilot.onroad.speed_renderer import SpeedRenderer
 from openpilot.selfdrive.ui.ui_state import ui_state, UIStatus
@@ -34,6 +35,7 @@ class HudRendererSP(HudRenderer):
     self.speed_limit_renderer = SpeedLimitRenderer()
     self.smart_cruise_control_renderer = SmartCruiseControlRenderer()
     self.turn_signal_controller = TurnSignalController()
+    self.blind_spot_bars = BlindSpotBars()
     self.circular_alerts_renderer = CircularAlertsRenderer()
     self.speed_renderer = SpeedRenderer()
     self._torque_bar = TorqueBar(scale=3.0, always=True)
@@ -58,6 +60,7 @@ class HudRendererSP(HudRenderer):
     self.speed_limit_renderer.update()
     self.smart_cruise_control_renderer.update()
     self.turn_signal_controller.update()
+    self.blind_spot_bars.update()
     self.circular_alerts_renderer.update()
     self.speed_renderer.update()
 
@@ -142,5 +145,6 @@ class HudRendererSP(HudRenderer):
     self.speed_limit_renderer.render(rect)
     self.smart_cruise_control_renderer.render(rect)
     self.turn_signal_controller.render(rect)
+    self.blind_spot_bars.render(rect)
     self.circular_alerts_renderer.render(rect)
     self.rocket_fuel.render(rect, ui_state.sm)
